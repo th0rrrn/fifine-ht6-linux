@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Заряд FIFINE HT6 для виджета/скриптов.
+
+    fifine-battery           → "90%"
+    fifine-battery --json    → {"connected":true,"battery":90,"status":2,...}
+    fifine-battery --plain   → "90"
+
+Код возврата: 0 — данные есть, 1 — устройство не найдено/не отвечает.
+"""
+import json
+import sys
+
+VID, PID = 0x3142, 0x00C3
+REPORT = 64
+CMD_GET_STATE = [0x55, 0x65, 0x01, 0x00]
+
+FIELDS = {
+    2: "battery",
+    3: "status",
+    4: "sound_mode",
+    7: "sleep_time",
+    8: "sidetone_on",
+    9: "sidetone_vol",
+}
+
+
+def read_state():
+    try:
+        import hid
+    except ImportError:
+        return None
+
+    devs = [d for d in hid.enumerate(VID, PID) if d.get("usage_page") in (0xFF90, 0xFF82)]
+    if not devs:
+        return None
+
+    for d in devs:
+        dev = None
+        try:
+            dev = hid.device()
+            dev.open_path(d["path"])
+            dev.set_nonblocking(1)
+            payload = bytes(CMD_GET_STATE) + b"\x00" * (REPORT - len(CMD_GET_STATE))
+            dev.write(payload)
+            for _ in range(20):
+                pkt = dev.read(REPORT, 100)
+                if pkt and len(pkt) >= 2 and pkt[0] == 0x55 and pkt[1] == 0x65:
+                    out = {"connected": True}
+                    for idx, name in FIELDS.items():
+                        if idx < len(pkt):
+                            out[name] = pkt[idx]
+                    return out
+        except Exception:
+            continue
+        finally:
+            if dev is not None:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+    return None
+
+
+def main():
+    state = read_state()
+    as_json = "--json" in sys.argv
+    plain = "--plain" in sys.argv
+
+    # кэш последнего состояния — чтобы другие утилиты не дёргали USB зря
+    try:
+        import time as _t
+        _cache = __import__("pathlib").Path.home() / ".cache" / "fifine-battery.state"
+        _cache.parent.mkdir(parents=True, exist_ok=True)
+        _cache.write_text(
+            f"{int(_t.time())} {state.get('battery') if state else 'na'}\n"
+        )
+    except Exception:
+        pass
+
+    if not state:
+        if as_json:
+            print(json.dumps({"connected": False}))
+        else:
+            print("--")
+        return 1
+
+    # 0x0A — наушники выключены, 0x1A — потеряна связь с гарнитурой
+    if state.get("status") in (0x0A, 0x1A) or "battery" not in state:
+        if as_json:
+            print(json.dumps({"connected": False, "status": state.get("status")}))
+        else:
+            print("--")
+        return 1
+
+    if as_json:
+        print(json.dumps(state, ensure_ascii=False))
+    elif plain:
+        print(state["battery"])
+    else:
+        print(f"{state['battery']}%")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
