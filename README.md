@@ -45,7 +45,7 @@ sudo apt install python3-hid
 Then:
 
 ```bash
-git clone https://github.com/<you>/fifine-ht6-linux
+git clone https://github.com/th0rrrn/fifine-ht6-linux
 cd fifine-ht6-linux
 ./fifine_ht6.py state
 ```
