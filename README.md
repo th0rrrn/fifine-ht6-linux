@@ -1,5 +1,7 @@
 # fifine-ht6-linux
 
+**🇬🇧 English · 🇷🇺 [Русский](README.ru.md)**
+
 Control tool for the **FIFINE HT6** wireless headset on Linux: battery level,
 sound mode, sleep timer and RGB lighting — everything the vendor's Windows
 software does over USB, without Windows.
