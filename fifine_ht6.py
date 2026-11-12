@@ -8,7 +8,8 @@
     ./fifine_ht6.py probe        # перебрать варианты отправки
     ./fifine_ht6.py state        # прочитать пакет состояния
     ./fifine_ht6.py mode 1       # sound_mode (0/1/2)
-    ./fifine_ht6.py led cycle    # подсветка: always|cycle|breath|rhythm|preset
+    ./fifine_ht6.py led off      # выключить подсветку (55 0C 00)
+    ./fifine_ht6.py led rhythm   # always|cycle|breath|rhythm|on|off
     ./fifine_ht6.py color ff0000 # цвет подсветки (RRGGBB)
     ./fifine_ht6.py sleep 30     # таймер сна в минутах (255 = выключить)
 
@@ -28,14 +29,17 @@ REPORT = 64
 CMD_GET_STATE = [0x55, 0x65, 0x01, 0x00]
 CMD_SET_SOUND_MODE = [0x55, 0x21, 0x01]   # + [mode]
 CMD_SET_SLEEP = [0x55, 0x23, 0x01]        # + [minutes], 255 = выкл
-CMD_GET_LED = [0x55, 0x06, 0x00]          # ответ: 55 06 00 RR GG BB ..
+CMD_GET_LED = [0x55, 0x06, 0x00]          # ответ: 55 06 mode RR GG BB speed ..
+CMD_LED_ENABLE = [0x55, 0x0C, 0x01]       # включить RGB
+CMD_LED_DISABLE = [0x55, 0x0C, 0x00]      # выключить RGB (настоящий off)
 
-# режимы подсветки — сняты с живого трафика SoundLink
+# режим подсветки -> (mode, число цветов в таблице)
+# снято с живого трафика и из вендорского приложения
 LED_MODES = {
-    "always": [0x00, 0x08, 0x00, 0x0A],
-    "cycle":  [0x01, 0x7E, 0x00, 0x0A],
-    "breath": [0x02, 0x80, 0x00, 0x0A],
-    "rhythm": [0x03, 0x80, 0x00, 0x0A],
+    "always": (0x00, 8),
+    "cycle":  (0x01, 126),
+    "breath": (0x02, 128),
+    "rhythm": (0x03, 128),
 }
 
 # индексы в пакете состояния (из HidMonitor._parse_packet)
@@ -143,52 +147,73 @@ def get_led(dev):
 
 # ---------- высокий уровень ----------
 
-def _transaction(dev, middle):
-    """Обрамление записи: без него донгл молча отбрасывает команды.
+def _apply_led(dev, mode, count, r, g, b):
+    """Полная последовательность LED-движка из вендорского приложения.
 
-    55 0C 01 → ... → 55 05 00 → 55 01 00
+        55 0C 01                    включить RGB
+        55 02 00                    остановить движок
+        55 03 mode count 00 0A 00   режим и число цветов в таблице
+        55 04 <index> <4×RGB>       таблица цветов
+        55 05 00                    сохранить во флеш
+        55 01 00                    запустить движок
+
+    Без этой последовательности донгл молча выбрасывает запись, а чтение
+    ``55 06`` продолжает отдавать старое значение.
     """
-    send(dev, [0x55, 0x0C, 0x01])
-    time.sleep(0.02)
+    send(dev, CMD_LED_ENABLE)
+    time.sleep(0.01)
     send(dev, [0x55, 0x02, 0x00])
-    time.sleep(0.02)
-    for cmd in middle:
-        send(dev, cmd)
-        time.sleep(0.02)
+    time.sleep(0.01)
+    send(dev, [0x55, 0x03, mode, count & 0xFF, (count >> 8) & 0xFF, 0x0A, 0x00])
+    time.sleep(0.01)
+    upload_color_table(dev, r, g, b, count)
     send(dev, [0x55, 0x05, 0x00])
-    time.sleep(0.02)
+    time.sleep(0.01)
     send(dev, [0x55, 0x01, 0x00])
+
+
+def upload_color_table(dev, r, g, b, count):
+    """Залить таблицу цветов.
+
+    Для breath/rhythm — плавный переход от выбранного цвета к чёрному
+    (128 значений). Для always используется только первая запись. Для
+    cycle вендорское приложение заливает отдельную фиксированную радугу;
+    здесь используется тот же плавный переход.
+    """
+    for base in range(0, count, 4):
+        payload = [0x55, 0x04, base & 0xFF, (base >> 8) & 0xFF]
+        for i in range(4):
+            if base + i < count:
+                k = 1.0 - (base + i) / 128
+                payload += [int(r * k), int(g * k), int(b * k)]
+            else:
+                payload += [0, 0, 0]
+        send(dev, payload)
+        time.sleep(0.01)
 
 
 def set_led_mode(dev, name):
     if name not in LED_MODES:
         raise ValueError(name)
-    _transaction(dev, [[0x55, 0x03] + LED_MODES[name]])
+    mode, count = LED_MODES[name]
+    led = get_led(dev)
+    r, g, b = led if led else (0xFF, 0xFF, 0xFF)
+    _apply_led(dev, mode, count, r, g, b)
 
 
-def upload_gradient(dev, r, g, b, steps=128):
-    """Залить градиент от цвета к чёрному.
+def set_led_off(dev):
+    """Штатное выключение подсветки наушников (55 0C 00)."""
+    send(dev, CMD_LED_DISABLE)
 
-    Нужен анимированным режимам (cycle/breath/rhythm): они берут цвета
-    из этой таблицы, а не из регистра цвета.
-    """
-    for pkt in range(steps // 4):
-        payload = [0x55, 0x04, pkt * 4, 0x00]
-        for i in range(4):
-            k = 1.0 - (pkt * 4 + i) / steps
-            payload += [int(r * k), int(g * k), int(b * k)]
-        send(dev, payload)
-        time.sleep(0.005)
+
+def set_led_on(dev):
+    """Включить подсветку обратно (55 0C 01)."""
+    send(dev, CMD_LED_ENABLE)
 
 
 def set_color(dev, r, g, b, mode_name="always"):
-    m = LED_MODES.get(mode_name, LED_MODES["always"])
-    upload_gradient(dev, r, g, b)
-    _transaction(dev, [
-        [0x55, 0x03] + m,
-        [0x55, 0x04, 0x00, 0x00, r, g, b],
-        [0x55, 0x04, 0x04, 0x00],
-    ])
+    mode, count = LED_MODES.get(mode_name, LED_MODES["always"])
+    _apply_led(dev, mode, count, r, g, b)
 
 
 # ---------- CLI ----------
@@ -251,13 +276,18 @@ def cmd_mode(value):
 
 
 def cmd_led(name):
-    if name not in LED_MODES:
-        print("режимы:", ", ".join(LED_MODES))
+    if name not in LED_MODES and name not in ("on", "off"):
+        print("режимы:", ", ".join(list(LED_MODES) + ["on", "off"]))
         return
     dev = open_device()
     if not dev:
         sys.exit("не удалось открыть устройство")
-    set_led_mode(dev, name)
+    if name == "off":
+        set_led_off(dev)
+    elif name == "on":
+        set_led_on(dev)
+    else:
+        set_led_mode(dev, name)
     print(f"подсветка: {name}")
     dev.close()
 

@@ -26,6 +26,12 @@ Tested on: **VID `3142` / PID `00C3`**, dongle firmware 1.8, headset 4.2.
 Other FIFINE models using the same Bolutek/Actions dongle family may work —
 `./fifine_ht6.py state` will tell you.
 
+### About the dongle LED
+
+The green LED on the USB dongle is a hardware link indicator. It is not
+exposed as an RGB zone and cannot be turned off in software — `55 0C 00`
+only affects the headset LEDs.
+
 ### About the equalizer
 
 The headset has **no DSP of its own**. Everything SoundLink does with EQ,
@@ -60,6 +66,8 @@ No root needed — the device is accessed through `/dev/hidraw*`.
 ./fifine_ht6.py state                    # battery, mode, LED color, firmware
 ./fifine_ht6.py mode 1                   # sound mode 0/1/2
 ./fifine_ht6.py sleep 30                 # auto power-off in minutes (255 = off)
+./fifine_ht6.py led off                  # turn the headset LEDs off (true off)
+./fifine_ht6.py led on                   # enable them again
 ./fifine_ht6.py led breath               # always | cycle | breath | rhythm
 ./fifine_ht6.py color ff69b4             # LED color (always-on mode)
 ./fifine_ht6.py color ff69b4 rhythm      # color + mode in one go
@@ -101,10 +109,13 @@ Short version — the device speaks 64-byte HID reports, report ID `0x55`:
 55 21 01 <mode>             set sound mode
 55 23 01 <minutes>          set sleep timer (255 = off)
 55 06 00                    read LED state
+55 0C 01 / 55 0C 00         enable / disable the RGB engine
 ```
 
-Writes that change the LED need a **transaction wrapper**
-(`55 0C 01 … 55 05 00 55 01 00`) or the dongle silently drops them.
+LED writes use the vendor app's engine sequence: enable RGB (`55 0C 01`),
+stop the engine (`55 02 00`), configure the mode and upload the colour table,
+save (`55 05 00`), start (`55 01 00`). Without it the dongle silently drops
+the write. `55 0C 00` is a true off.
 Full details, packet layouts and the reverse-engineering notes:
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 

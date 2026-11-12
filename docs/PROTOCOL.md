@@ -32,7 +32,8 @@ report ID, not part of the payload.
 | `55 21 01 <mode>` | set sound mode (0/1/2) |
 | `55 23 01 <minutes>` | set sleep timer, `255` = disabled |
 | `55 06 00` | read LED state |
-| `55 0C 01` … `55 01 00` | transaction wrapper for LED writes (see below) |
+| `55 0C 01` / `55 0C 00` | enable / disable the RGB engine |
+| `55 0B <0\|1>` | local random mode off/on |
 
 ## State packet
 
@@ -55,73 +56,71 @@ Reply to `55 65 01 00`, 64 bytes:
 | 16 | `headset_version_major` | 4 |
 | 17 | `headset_version_minor` | 2 → firmware 4.2 |
 | 18 | `feature_rgb` | headset has RGB |
-| 19 | `feature_dongle_rgb` | dongle has RGB |
-| 20 | `feature_rgb_switch` | |
-| 21 | `feature_dongle_rgb_switch` | |
+| 19 | `feature_rgb_bottom` | second RGB zone (0 on HT6) |
+| 20 | `feature_rgb_local_switch` | device supports local random mode |
+| 21 | `feature_rgb_bottom_switch` | |
 
 Special statuses:
 
 - byte `0x0A` → headset is powered off / disconnected
 - byte `0x1A` → wireless link to the headset lost
 
+The green LED on the dongle is a hardware link indicator: there is no feature
+flag and no HID command for it. `55 0C 00` only turns off the headset LEDs.
+
 ## LED state
 
 Reply to `55 06 00`:
 
 ```
-55 06 00 RR GG BB 0A 00 …
+55 06 MM RR GG BB SS 00 …
 ```
 
-Bytes 3–5 are the current colour, byte 6 is the animation speed.
+- `MM` — mode: 0 static, 1 cycle, 2 breathing, 3 rhythm, 4 off, 5 local random
+- `RR GG BB` — current colour (retained while the engine is off)
+- `SS` — interval/speed byte (`0x0A` on the tested unit)
 
-## LED writes need a transaction
+## LED writes: the vendor's engine sequence
 
-This is the part that cost the most time. Sending the colour packet on its own
-is accepted by the driver but **silently dropped by the dongle** — and
-`55 06` keeps reporting the old value, which makes it look like a wrong packet
-format.
+Sending a colour packet on its own is accepted by the driver but **silently
+dropped by the dongle** — `55 06` keeps reporting the old value, which makes it
+look like a wrong packet format.
 
-The vendor app always sends a full sequence:
-
-```
-55 0C 01                begin
-55 02 00                parameter
-55 03 <mode> 00 0A      mode: 00 always / 01 cycle / 02 breath / 03 rhythm
-55 04 00 00 RR GG BB    colour
-55 04 04 00             clear the rest
-55 05 00                parameter
-55 01 00                commit
-```
-
-For a mode change without colour, the same wrapper without the two `55 04`
-packets.
-
-### Colour in animated modes
-
-The colour register (`55 04 00 00 RR GG BB`) only affects **always-on** mode.
-`cycle`, `breath` and `rhythm` take colours from a **gradient table**, so it
-must be re-uploaded whenever the colour changes. Otherwise the mode applies,
-`55 06` reports the new colour, and the LED keeps the old one.
-
-The gradient is 128 RGB triples, uploaded as 32 packets of four values:
+The vendor app stops the LED engine, configures it and starts it again:
 
 ```
-55 04 <offset> 00 <v0:3> <v1:3> <v2:3> <v3:3>      offset = 0x00 … 0x7C, step 4
+55 0C 01                       enable RGB
+55 02 00                       stop the LED engine
+55 03 MM CC CC II II 00        mode, colour count, interval
+55 04 <index> <4×RGB>          colour table, four colours per packet
+55 05 00                       save to flash
+55 01 00                       start the LED engine
 ```
 
-Values fade linearly from the base colour to black:
+`55 0C 00` disables the RGB engine entirely — this is the real "lights off"
+command used by the app's toggle. `55 0B 01` selects the local random mode
+(mode 5) and `55 0B 00` leaves it.
+
+Mode values: `00` static, `01` cycle, `02` breathing, `03` rhythm, `04` off
+(reported after `55 0C 00`), `05` local random.
+
+### Colour table
+
+The LED engine reads colours from the uploaded table, not from a colour
+register. The table is a list of RGB triples, sent four at a time:
 
 ```
-v[i] = colour * (1 - i / 128)
+55 04 <index_lo> <index_hi> <v0:3> <v1:3> <v2:3> <v3:3>
 ```
 
-The vendor app uploads this table on every device connect, which is why
-changing colour in their UI "just works".
+- **static** — 8 entries; the first is the chosen colour, the rest are black;
+- **breathing / rhythm** — 128 entries, a linear fade from the chosen colour
+  to black: `v[i] = colour * (1 - i / 128)`;
+- **cycle** — 126 entries, a fixed rainbow table built into the vendor app.
 
-Working order:
-
-1. upload the gradient (32 packets)
-2. send the transaction with mode + colour
+`CC CC` in the mode packet is the entry count and `II II` is the animation
+interval. This is why changing the colour in the app "just works": it
+re-uploads the table every time.
 
 ## Not in the device
 
@@ -131,6 +130,8 @@ Working order:
   `fetch_status`, `reset`, `setup_config`. Not implemented here on purpose:
   two firmware targets (dongle, headset) and two headset revisions, and a
   failed flash has no recovery path.
+- **Dongle LED** — the green LED is a hardware link indicator. It is not
+  exposed as an RGB zone and no command affects it.
 
 ## Capturing traffic
 
